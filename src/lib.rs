@@ -167,18 +167,25 @@ pub fn default_escape_sequence(s: &str) -> Result<(char, &str), Error> {
 }
 
 #[inline]
+fn non_empty(s: &str) -> Option<&str> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+#[inline]
 fn split_at_escape(s: &str) -> (Option<&str>, Option<&str>) {
     if let Some((first, last)) = s.split_once('\\') {
         (
-            if first.is_empty() { None } else { Some(first) },
+            non_empty(first),
             // make sure this one is non-`None` to correctly error on incomplete
             // escape sequences (i.e. strings ending in an unescaped backslash)
             Some(last),
         )
-    } else if s.is_empty() {
-        (None, None)
     } else {
-        (Some(s), None)
+        (non_empty(s), None)
     }
 }
 
@@ -192,10 +199,10 @@ pub struct Unescape<'a, F, E, C = Option<char>>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
     C: From<char>,
-    StringFragment<'a>: From<C>,
 {
     bare: Option<&'a str>,
     escaped: Option<&'a str>,
+    rem: Option<&'a str>,
     escape_sequence: F,
 }
 
@@ -203,7 +210,6 @@ impl<'a, F, E, C> Unescape<'a, F, E, C>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
     C: From<char>,
-    StringFragment<'a>: From<C>,
 {
     /// Make a new unescaper over the given string using the given escape
     /// sequence parser.
@@ -215,24 +221,59 @@ where
     /// `('\n', "abc")`.
     #[inline]
     pub fn new(escape_sequence: F, from: &'a str) -> Self {
+        let rem = non_empty(from);
         let (bare, escaped) = split_at_escape(from);
         Self {
             bare,
             escaped,
+            rem,
             escape_sequence,
         }
     }
 
+    /// Returns the unparsed remainder of the string.
+    ///
+    /// If all the string has been consumed, returns `None`.
+    #[inline]
+    pub fn remainder(&self) -> Option<&'a str> {
+        self.rem
+    }
+}
+
+impl<'a, F, E, C> Unescape<'a, F, E, C>
+where
+    F: FnMut(&'a str) -> Result<(C, &'a str), E>,
+    C: From<char>,
+    StringFragment<'a>: From<C>,
+{
     /// Get the next string fragment rather than just the next character.
     ///
     /// Advances the iterator accordingly.
     #[inline]
     pub fn next_fragment(&mut self) -> Option<Result<StringFragment<'a>, E>> {
-        if let Some(rem) = self.bare.take() {
-            Some(Ok(StringFragment::Raw(rem)))
+        if let Some(frag) = self.bare.take() {
+            self.rem = self.rem.and_then(|rem| non_empty(&rem[frag.len()..]));
+            Some(Ok(StringFragment::Raw(frag)))
         } else {
             self.next().map(|opt| opt.map(StringFragment::from))
         }
+    }
+
+    /// Processes the rest of the iterator into a [`Cow`] string.
+    ///
+    /// Avoids allocation unless any escape sequences were found and had to be
+    /// processed; raw strings are returned as-is.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    pub fn as_cow(&mut self) -> Result<Cow<'a, str>, E> {
+        let mut out = Cow::default();
+        while let Some(fragment) = self.next_fragment().transpose()? {
+            match fragment {
+                StringFragment::Raw(s) => out += s,
+                StringFragment::Escaped(c) => out.to_mut().push(c),
+                StringFragment::Empty => (),
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -240,7 +281,6 @@ impl<'a, F, E, C> Iterator for Unescape<'a, F, E, C>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
     C: From<char>,
-    StringFragment<'a>: From<C>,
 {
     type Item = Result<C, E>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -250,12 +290,14 @@ where
                 let mut chars = bare.chars();
                 let ch = chars.next()?;
                 *bare = chars.as_str();
+                self.rem = self.rem.and_then(|rem| non_empty(&rem[ch.len_utf8()..]));
                 Some(Ok(C::from(ch)))
             })
             .or_else(|| {
                 if let Some(s) = self.escaped.take() {
                     Some(match (self.escape_sequence)(s) {
                         Ok((ch, rem)) => {
+                            self.rem = non_empty(rem);
                             let (bare, escaped) = split_at_escape(rem);
                             self.bare = bare;
                             self.escaped = escaped;
@@ -283,7 +325,6 @@ impl<'a, F, E, C> core::iter::FusedIterator for Unescape<'a, F, E, C>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
     C: From<char>,
-    StringFragment<'a>: From<C>,
 {
 }
 
@@ -292,29 +333,21 @@ where
 pub type UnescapeDefault<'a> =
     Unescape<'a, fn(&'a str) -> Result<(char, &'a str), Error>, Error, char>;
 
-/// Unescape the string into a [`std::borrow::Cow`] string.
+/// Unescape the string into a [`Cow`] string.
 ///
 /// The function only allocates if any escape sequences were found; otherwise,
 /// the original string is returned unchanged.
 /// More information on the escape sequence parser which is provided here can
 /// be found at [`Unescape::new`].
 #[cfg(any(feature = "std", feature = "alloc"))]
+#[inline]
 pub fn unescape<'a, F, E, C>(escape_sequence: F, s: &'a str) -> Result<Cow<'a, str>, E>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
     C: From<char>,
     StringFragment<'a>: From<C>,
 {
-    let mut out = Cow::default();
-    let mut unescaped = Unescape::new(escape_sequence, s);
-    while let Some(fragment) = unescaped.next_fragment().transpose()? {
-        match fragment {
-            StringFragment::Raw(s) => out += s,
-            StringFragment::Escaped(c) => out.to_mut().push(c),
-            StringFragment::Empty => (),
-        }
-    }
-    Ok(out)
+    Unescape::new(escape_sequence, s).as_cow()
 }
 
 /// Unescapes the string as [`unescape`] using the default escape sequence
@@ -323,17 +356,9 @@ where
 /// See [`default_escape_sequence`] for a list of the supported escape
 /// sequences.
 #[cfg(any(feature = "std", feature = "alloc"))]
+#[inline]
 pub fn unescape_default(s: &str) -> Result<Cow<str>, Error> {
-    let mut out = Cow::default();
-    let mut unescaped = UnescapeDefault::new(default_escape_sequence, s);
-    while let Some(fragment) = unescaped.next_fragment().transpose()? {
-        match fragment {
-            StringFragment::Raw(s) => out += s,
-            StringFragment::Escaped(c) => out.to_mut().push(c),
-            StringFragment::Empty => (),
-        }
-    }
-    Ok(out)
+    UnescapeDefault::new(default_escape_sequence, s).as_cow()
 }
 
 #[cfg(all(test, feature = "std"))]
