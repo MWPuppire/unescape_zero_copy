@@ -16,7 +16,7 @@ use alloc::borrow::Cow;
 use std::borrow::Cow;
 
 /// Errors which may be returned by the unescaper.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Error {
     /// Error type for a string ending in a backslash without a following escape
     /// sequence.
