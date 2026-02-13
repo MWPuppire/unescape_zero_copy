@@ -95,7 +95,7 @@ impl<'a> From<&'a str> for StringFragment<'a> {
 
 #[inline]
 fn unicode_char(s: &str, chars: usize) -> Result<(char, &str), Error> {
-    if s.len() < chars {
+    if s.len() < chars || !s.as_bytes()[..chars].is_ascii() {
         Err(Error::IncompleteUnicode)
     } else {
         let num = u32::from_str_radix(&s[0..chars], 16)?;
@@ -398,6 +398,11 @@ mod test {
         assert_eq!(unescape_default(r"\u{1234}").unwrap(), "\u{1234}");
         assert_eq!(unescape_default(r"\U0010FFFF").unwrap(), "\u{10FFFF}");
         assert_eq!(unescape_default(r"\x20").unwrap(), " ");
+    }
+
+    #[test]
+    fn unicode_multibyte() {
+        assert!(unescape_default(r"\Uparrow⇑").is_err());
     }
 
     #[quickcheck]
