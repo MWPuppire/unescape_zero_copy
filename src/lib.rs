@@ -143,11 +143,13 @@ pub fn default_escape_sequence(s: &str) -> Result<(char, &str), Error> {
         'u' => {
             let s = chars.as_str();
             if chars.next() == Some('{') {
-                let s = chars.as_str();
-                let size = chars.by_ref().take_while(|n| *n != '}').count();
-                let num = u32::from_str_radix(&s[0..size], 16)?;
+                let (hex, rest) = chars
+                    .as_str()
+                    .split_once('}')
+                    .ok_or(Error::IncompleteUnicode)?;
+                let num = u32::from_str_radix(hex, 16)?;
                 let ch = char::from_u32(num).ok_or(Error::InvalidUnicode(num))?;
-                Ok((ch, chars.as_str()))
+                Ok((ch, rest))
             } else {
                 unicode_char(s, 4)
             }
@@ -357,7 +359,7 @@ where
 /// sequences.
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[inline]
-pub fn unescape_default(s: &str) -> Result<Cow<str>, Error> {
+pub fn unescape_default(s: &str) -> Result<Cow<'_, str>, Error> {
     UnescapeDefault::new(default_escape_sequence, s).as_cow()
 }
 
@@ -403,6 +405,40 @@ mod test {
     #[test]
     fn unicode_multibyte() {
         assert!(unescape_default(r"\Uparrow⇑").is_err());
+    }
+
+    #[test]
+    fn unicode_brace_escapes() {
+        // Regression: char count was used as byte index, panicking on multibyte input
+        assert!(unescape_default("\\u{H…H}").is_err()); // 3-byte '…'
+        assert!(unescape_default("\\u{café}").is_err()); // 2-byte 'é'
+        assert!(unescape_default("\\u{🦀}").is_err()); // 4-byte '🦀'
+
+        // Missing closing brace
+        assert_eq!(unescape_default(r"\u{41"), Err(Error::IncompleteUnicode));
+
+        // Empty braces
+        assert!(matches!(
+            unescape_default(r"\u{}"),
+            Err(Error::ParseIntError(_))
+        ));
+
+        // Boundary values
+        assert_eq!(unescape_default(r"\u{0}").unwrap(), "\0");
+        assert_eq!(unescape_default(r"\u{10FFFF}").unwrap(), "\u{10FFFF}");
+
+        // Invalid code point
+        assert_eq!(
+            unescape_default(r"\u{D800}"),
+            Err(Error::InvalidUnicode(0xD800))
+        );
+        assert_eq!(
+            unescape_default(r"\u{110000}"),
+            Err(Error::InvalidUnicode(0x110000))
+        );
+
+        // Remainder tracking
+        assert_eq!(unescape_default(r"\u{48}\u{49}").unwrap(), "HI");
     }
 
     #[quickcheck]

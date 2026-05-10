@@ -28,11 +28,13 @@ fn lua_escape_sequence(s: &str) -> Result<(Option<char>, &str), Error> {
         }
         'u' => {
             if chars.next() == Some('{') {
-                let s = chars.as_str();
-                let size = chars.by_ref().take_while(|n| *n != '}').count();
-                let num = u32::from_str_radix(&s[0..size], 16)?;
+                let (hex, rest) = chars
+                    .as_str()
+                    .split_once('}')
+                    .ok_or(Error::IncompleteUnicode)?;
+                let num = u32::from_str_radix(hex, 16)?;
                 let ch = char::from_u32(num).ok_or(Error::InvalidUnicode(num))?;
-                Ok((Some(ch), chars.as_str()))
+                Ok((Some(ch), rest))
             } else {
                 Err(Error::UnknownSequence('u'))
             }
@@ -65,4 +67,11 @@ fn lua_escapes() {
     assert_eq!(unescape(lua_escape_sequence, r"\z   a").unwrap(), "a");
     assert_eq!(unescape(lua_escape_sequence, r"\za").unwrap(), "a");
     assert_eq!(unescape(lua_escape_sequence, r"a\\b").unwrap(), "a\\b");
+    // \u{...} escape
+    assert_eq!(unescape(lua_escape_sequence, r"\u{61}").unwrap(), "a");
+    assert!(unescape(lua_escape_sequence, "\\u{café}").is_err());
+    assert_eq!(
+        unescape(lua_escape_sequence, r"\u{41"),
+        Err(Error::IncompleteUnicode)
+    );
 }
