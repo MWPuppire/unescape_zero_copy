@@ -22,7 +22,7 @@ pub enum Error {
     /// sequence.
     IncompleteSequence,
     /// Error type for a string ending in a Unicode escape sequence (e.g. `\x`)
-    /// without the appropriate amount of hex digits.
+    /// without the appropriate amount of hex digits or the closing `}`.
     IncompleteUnicode,
     /// Error type for a Unicode sequence without a valid character code.
     InvalidUnicode(u32),
