@@ -17,6 +17,7 @@ use std::borrow::Cow;
 
 /// Errors which may be returned by the unescaper.
 #[derive(Debug, PartialEq, Clone)]
+#[non_exhaustive]
 pub enum Error {
     /// Error type for a string ending in a backslash without a following escape
     /// sequence.
@@ -195,7 +196,7 @@ fn split_at_escape(s: &str) -> (Option<&str>, Option<&str>) {
 ///
 /// The escape sequences are parsed according to the function provided at the
 /// unescaper's creation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 // default type for backwards compatibility
 pub struct Unescape<'a, F, E, C = Option<char>>
 where
@@ -242,6 +243,22 @@ where
     }
 }
 
+// implements `Debug` without having to have `Debug` on the escape sequence
+// function, since function pointers don't implement `Debug`
+impl<'a, F, E, C> fmt::Debug for Unescape<'a, F, E, C>
+where
+    F: FnMut(&'a str) -> Result<(C, &'a str), E>,
+    C: From<char> + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Unescape")
+            .field("bare", &self.bare)
+            .field("escaped", &self.escaped)
+            .field("rem", &self.rem)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, F, E, C> Unescape<'a, F, E, C>
 where
     F: FnMut(&'a str) -> Result<(C, &'a str), E>,
@@ -276,6 +293,20 @@ where
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<'a, F, E, C> core::convert::TryFrom<Unescape<'a, F, E, C>> for Cow<'a, str>
+where
+    F: FnMut(&'a str) -> Result<(C, &'a str), E>,
+    C: From<char>,
+    StringFragment<'a>: From<C>,
+{
+    type Error = E;
+
+    fn try_from(mut value: Unescape<'a, F, E, C>) -> Result<Self, E> {
+        value.as_cow()
     }
 }
 
@@ -363,6 +394,46 @@ pub fn unescape_default(s: &str) -> Result<Cow<'_, str>, Error> {
     UnescapeDefault::new(default_escape_sequence, s).as_cow()
 }
 
+/// Splits a string at an unescaped instance of `split_at`, returning a tuple of
+/// the split string.
+///
+/// Escaped characters are allowed. The tuple is the string up to the character,
+/// and then the string after it if there is any content after. The character
+/// the split occurs on is not in either string.
+///
+/// Designed to work for lexers, to find the end of a string by an unescaped
+/// quote character.
+pub fn split_at_unescaped<'a, F, C>(
+    escape_sequence: F,
+    s: &'a str,
+    split_at: char,
+) -> Option<(&'a str, Option<&'a str>)>
+where
+    F: FnMut(&'a str) -> Result<(C, &'a str), Error> + Clone,
+    C: From<char>,
+    StringFragment<'a>: From<C>,
+{
+    let start = s.as_ptr().addr();
+    let mut rem = Some(s);
+    while let Some(sub) = rem {
+        let (fst, snd) = sub.split_once(split_at)?;
+        rem = non_empty(snd);
+        let range = fst
+            .as_ptr()
+            .addr()
+            .wrapping_add(fst.len())
+            .wrapping_sub(start);
+        let slice = &s[..range];
+
+        let mut un = Unescape::new(escape_sequence.clone(), fst)
+            .skip_while(|x| !matches!(x, Err(Error::IncompleteSequence)));
+        if un.next().is_none() {
+            return Some((slice, rem));
+        }
+    }
+    None
+}
+
 #[cfg(all(test, feature = "std"))]
 mod test {
     use super::*;
@@ -439,6 +510,34 @@ mod test {
 
         // Remainder tracking
         assert_eq!(unescape_default(r"\u{48}\u{49}").unwrap(), "HI");
+    }
+
+    #[test]
+    fn split_unescaped() {
+        assert_eq!(
+            split_at_unescaped(default_escape_sequence, "abc", '\"'),
+            None
+        );
+
+        assert_eq!(
+            split_at_unescaped(default_escape_sequence, "abc'xyz", '\''),
+            Some(("abc", Some("xyz")))
+        );
+
+        assert_eq!(
+            split_at_unescaped(default_escape_sequence, "abc'def'ghi", '\''),
+            Some(("abc", Some("def'ghi")))
+        );
+
+        let split = split_at_unescaped(default_escape_sequence, r#"before\"split"after"#, '\"');
+        assert_eq!(split, Some((r#"before\"split"#, Some("after"))));
+        let unesc = unescape_default(split.unwrap().0).unwrap();
+        assert_eq!(unesc, "before\"split");
+
+        assert_eq!(
+            split_at_unescaped(default_escape_sequence, r#"\\\\\""#, '\"'),
+            None
+        );
     }
 
     #[quickcheck]
